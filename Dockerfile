@@ -69,4 +69,4 @@ RUN echo "=== Debug: Final startup test ===" && \
     python -c "print('Testing main.py import...'); import main; print('Main.py import successful')"
 
 # Command to run the application
-CMD ["python", "main.py", "--transport", "streamable-http"]
+CMD ["python", "main.py", "--transport", "streamable-http", "--allow-http"]
