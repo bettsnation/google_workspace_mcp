@@ -1,0 +1,130 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    outputs:
+      next_tag: ${{ steps.set_tags.outputs.next_tag }}
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Fetch all tags
+        run: git fetch --tags
+
+      - name: Set up Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.11'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+
+      - name: Cache Docker layers
+        uses: actions/cache@v3
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v1
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine CalVer Tag
+        id: set_tags
+        run: |
+          BASE_TAG=$(date +'%Y.%m.%d')
+          if [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            EXISTING_TAGS=$(git tag --list "${BASE_TAG}-dev.*" | sort -V | tail -n 1)
+            if [[ -z "$EXISTING_TAGS" ]]; then
+              TAG="${BASE_TAG}-dev.1"
+            else
+              LAST_SUFFIX=$(echo "$EXISTING_TAGS" | sed -E 's/.*-dev\.([0-9]+)$/\1/')
+              NEXT_SUFFIX=$((LAST_SUFFIX + 1))
+              TAG="${BASE_TAG}-dev.${NEXT_SUFFIX}"
+            fi
+          else
+            EXISTING_TAGS=$(git tag --list "${BASE_TAG}-*" | grep -v dev | sort -V | tail -n 1)
+            if [[ -z "$EXISTING_TAGS" ]]; then
+              TAG="${BASE_TAG}-1"
+            else
+              LAST_SUFFIX=$(echo "$EXISTING_TAGS" | sed -E 's/.*-([0-9]+)$/\1/')
+              NEXT_SUFFIX=$((LAST_SUFFIX + 1))
+              TAG="${BASE_TAG}-${NEXT_SUFFIX}"
+            fi
+          fi
+          echo "Generated tag: $TAG"
+          echo "next_tag=$TAG" >> $GITHUB_ENV
+          echo "::set-output name=next_tag::$TAG"
+
+      - name: Create Git tag
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git tag ${{ steps.set_tags.outputs.next_tag }}
+
+      - name: Push Git tag
+        run: |
+          git push origin ${{ steps.set_tags.outputs.next_tag }} || \
+          (echo "Tag exists. Deleting old tag and pushing new one." && \
+           git push origin :refs/tags/${{ steps.set_tags.outputs.next_tag }} && \
+           git push origin ${{ steps.set_tags.outputs.next_tag }})
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: .
+          tags: |
+            b3tts32/google_workspace_mcp:${{ steps.set_tags.outputs.next_tag }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+          push: true
+
+      - name: Image digest
+        run: echo ${{ steps.buildx.outputs.digest }}
+
+  update-docker-compose:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ success() }}
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set Deployment Branch & File
+        id: overlay
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            BRANCH="main"
+            COMPOSE_FILE="portainer/docker-compose.yml"
+          else
+            BRANCH="dev"
+            COMPOSE_FILE="portainer/docker-compose-dev.yml"
+          fi
+          echo "::set-output name=branch::$BRANCH"
+          echo "::set-output name=compose_file::$COMPOSE_FILE"
+
+      - name: Update the docker-compose file
+        run: |
+          BRANCH=${{ steps.overlay.outputs.branch }}
+          COMPOSE_FILE=${{ steps.overlay.outputs.compose_file }}
+          # Update all occurrences of the google_workspace_mcp image
+          sed -i "s|image: b3tts32/google_workspace_mcp:.*|image: b3tts32/google_workspace_mcp:${{ needs.build.outputs.next_tag }}|" $COMPOSE_FILE
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add $COMPOSE_FILE
+          git commit -m "Update $COMPOSE_FILE image tag to ${{ needs.build.outputs.next_tag }}"
+          git push origin $BRANCH
