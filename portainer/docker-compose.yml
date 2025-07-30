@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   google-workspace-mcp:
-    image: b3tts32/google_workspace_mcp:${IMAGE_TAG:-latest}
+    image: b3tts32/google_workspace_mcp:2025.07.30-1
     container_name: google-workspace-mcp
     restart: unless-stopped
     ports:
